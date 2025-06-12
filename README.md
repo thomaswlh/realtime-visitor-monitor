@@ -34,8 +34,8 @@
 1. Clone 本專案：
 
    ```bash
-   git clone https://github.com/your-username/e-ad-board-footfall-dashboard.git
-   cd e-ad-board-footfall-dashboard
+   git clone https://github.com/thomaswlh/realtime-visitor-monitor.git
+   cd realtime-visitor-monitor
    ```
 
 2. 安裝相關依賴（建議使用虛擬環境）：
