@@ -1,188 +1,153 @@
-# People-Counting-in-Real-Time
-People Counting in Real-Time using live video stream/IP camera in OpenCV.
+# 電子廣告板人流偵測與視覺化儀表板
 
-> NOTE: This is an improvement/modification to https://www.pyimagesearch.com/2018/08/13/opencv-people-counter/
+本專案包含以下三個主要部分，協助快速分析電子廣告板或展覽入口的人流情況及停留行為：
 
-<div align="center">
-<img src=https://imgur.com/SaF1kk3.gif" width=550>
-<p>Live demo</p>
-</div>
-
-- The primary aim is to use the project as a business perspective, ready to scale.
-- Use case: counting the number of people in the stores/buildings/shopping malls etc., in real-time.
-- Sending an alert to the staff if the people are way over the limit.
-- Automating features and optimising the real-time stream for better performance (with threading).
-- Acts as a measure towards footfall analysis and in a way to tackle COVID-19 scenarios.
-
---- 
-
-## Table of Contents
-
-* [Simple Theory](#simple-theory)
-    - [SSD detector](#ssd-detector)
-    - [Centroid tracker](#centroid-tracker)
-* [Running Inference](#running-inference)
-    - [Install the dependencies](#install-the-dependencies)
-    - [Test video file](#test-video-file)
-    - [Webcam](#webcam)
-    - [IP camera](#ip-camera)
-* [Features](#features)
-    - [Real-Time alert](#real-time-alert)
-    - [Threading](#threading)
-    - [Scheduler](#scheduler)
-    - [Timer](#timer)
-    - [Simple log](#simple-log)
-* [References](#references)
+* `people_counter.py`: 即時人流偵測與進出計數。
+* `region_tweak_gui.py` / `region_tweak_web.py`: 用於快速調整並預覽計數區域的 GUI 或網頁介面。
+* `dashboard.py`: 數據視覺化儀表板（Streamlit）。
 
 ---
 
-## Simple Theory
+## 功能特色
 
-### SSD detector
-
-- We are using a SSD ```Single Shot Detector``` with a MobileNet architecture. In general, it only takes a single shot to detect whatever is in an image. That is, one for generating region proposals, one for detecting the object of each proposal. 
-- Compared to other two shot detectors like R-CNN, SSD is quite fast.
-- ```MobileNet```, as the name implies, is a DNN designed to run on resource constrained devices. For e.g., mobiles, ip cameras, scanners etc.
-- Thus, SSD seasoned with a MobileNet should theoretically result in a faster, more efficient object detector.
-
-### Centroid tracker
-
-- Centroid tracker is one of the most reliable trackers out there.
-- To be straightforward, the centroid tracker computes the ```centroid``` of the bounding boxes.
-- That is, the bounding boxes are ```(x, y)``` co-ordinates of the objects in an image. 
-- Once the co-ordinates are obtained by our SSD, the tracker computes the centroid (center) of the box. In other words, the center of an object.
-- Then an ```unique ID``` is assigned to every particular object deteced, for tracking over the sequence of frames.
+* 📹 **人流自動偵測與進出計數（使用OpenCV、Norfair追蹤及MobileNet-SSD模型）**
+* 🎯 **可自訂計數區域與鏡頭角度校正**
+* 📝 **自動將進出人數、停留時間記錄到CSV日誌**
+* 📊 **即時儀表板展示數據分析（Streamlit）**
+* 🚦 **一鍵啟動，自動化記錄與分析**
 
 ---
 
-## Running Inference
+## 專案目錄
 
-### Install the dependencies
-
-First up, install all the required Python dependencies by running: ```
-pip install -r requirements.txt ```
-
-> NOTE: Supported Python version is 3.11.3 (there can always be version conflicts between the dependencies, OS, hardware etc.).
-
-### Test video file
-
-To run inference on a test video file, head into the root directory and run the command: 
-
-```
-python people_counter.py --prototxt detector/MobileNetSSD_deploy.prototxt --model detector/MobileNetSSD_deploy.caffemodel --input utils/data/tests/test_1.mp4
-```
-
-### Webcam
-
-To run on a webcam, set ```"url": 0``` in ```utils/config.json``` and run the command:
-
-```
-python people_counter.py --prototxt detector/MobileNetSSD_deploy.prototxt --model detector/MobileNetSSD_deploy.caffemodel
-```
-
-### IP camera
-
-To run on an IP camera, setup your camera url in ```utils/config.json```, e.g., ```"url": 'http://191.138.0.100:8040/video'```.
-
-Then run the command:
-```
-python people_counter.py --prototxt detector/MobileNetSSD_deploy.prototxt --model detector/MobileNetSSD_deploy.caffemodel
-```
+* [安裝 Installation](#安裝-installation)
+* [人流偵測程式說明（people\_counter.py）](#人流偵測程式說明-people_counterpy)
+* [區域調整與預覽工具說明（region\_tweak\_gui.py / region\_tweak\_web.py）](#區域調整與預覽工具說明-region_tweak)
+* [視覺化儀表板說明（dashboard.py）](#視覺化儀表板說明-dashboardpy)
+* [常見問題 FAQ](#常見問題-faq)
+* [License 授權](#license-授權)
 
 ---
 
-## Features
+## 安裝 Installation
 
-The following features can be easily enabled/disabled in ```utils/config.json```:
+1. Clone 本專案：
+
+   ```bash
+   git clone https://github.com/your-username/e-ad-board-footfall-dashboard.git
+   cd e-ad-board-footfall-dashboard
+   ```
+
+2. 安裝相關依賴（建議使用虛擬環境）：
+
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # Windows 使用 venv\Scripts\activate
+   pip install -r requirements.txt
+   ```
+
+主要依賴包括：
+
+* `opencv-python`
+* `norfair`
+* `nicegui` (若使用region\_tweak\_web.py)
+* `kivy` (若使用region\_tweak\_gui.py)
+* `streamlit`
+* `pandas`
+
+---
+
+## 人流偵測程式說明 (`people_counter.py`)
+
+### 使用方法
+
+配置`config.json`:
 
 ```json
 {
-    "Email_Send": "",
-    "Email_Receive": "",
-    "Email_Password": "",
-    "url": "",
-    "ALERT": false,
-    "Threshold": 10,
-    "Thread": false,
-    "Log": false,
-    "Scheduler": false,
-    "Timer": false
+  "url": "0"
 }
 ```
 
-### Real-Time alert
+啟動偵測程式：
 
-If selected, we send an email alert in real-time. Example use case: If the total number of people (say 10 or 30) are exceeded in a store/building, we simply alert the staff. 
-
-- You can set the max. people limit in config, e.g., ```"Threshold": 10```.
-- This is quite useful considering scenarios similar to COVID-19. Below is an example:
-<img src="https://imgur.com/35Yf1SR.png" width=350>
-
-> ***1. Setup your emails:***
-
-In the config, setup your sender email ```"Email_Send": ""``` to send the alerts and your receiver email ```"Email_Receive": ""``` to receive the alerts.
-
-> ***2. Setup your password:***
-
-Similarly, setup the sender email password ```"Email_Password": ""```.
-
-Note that the password varies if you have secured 2 step verification turned on, so refer the links below and create an application specific password:
-
-- Google mail has a guide here: https://myaccount.google.com/lesssecureapps
-- For 2 step verified accounts: https://support.google.com/accounts/answer/185833
-
-### Threading
-
-- Multi-Threading is implemented in ```utils/thread.py```. If you ever see a lag/delay in your real-time stream, consider using it.
-- Threading removes ```OpenCV's internal buffer``` (which basically stores the new frames yet to be processed until your system processes the old frames) and thus reduces the lag/increases fps.
-- If your system is not capable of simultaneously processing and outputting the result, you might see a delay in the stream. This is where threading comes into action.
-- It is most suitable to get solid performance on complex real-time applications. To use threading: set ```"Thread": true,``` in config.
-
-### Scheduler
-
-- Automatic scheduler to start the software. Configure to run at every second, minute, day, or workdays e.g., Monday to Friday.
-- This is extremely useful in a business scenario, for instance, you could run the people counter only at your desired time (maybe 9-5?).
-- Variables and any cache/memory would be reset, thus, less load on your machine.
-
-```python
-# runs at every day (09:00 am)
-schedule.every().day.at("9:00").do(run)
+```bash
+python people_counter.py -p models/MobileNetSSD_deploy.prototxt \
+    -m models/MobileNetSSD_deploy.caffemodel
 ```
 
-### Timer
+啟動偵測程式 (使用測試影片)：
 
-- Configure stopping the software execution after a certain time, e.g., 30 min or 8 hours (currently set) from now.
-- All you have to do is set your desired time and run the script.
-
-```python
-# automatic timer to stop the live stream (set to 8 hours/28800s)
-end_time = time.time()
-num_seconds = (end_time - start_time)
-if num_seconds > 28800:
-    break
+```bash
+python people_counter.py --prototxt detector/MobileNetSSD_deploy.prototxt --model detector/MobileNetSSD_deploy.caffemodel --input utils/data/tests/test_1.mp4
 ```
 
-### Simple log
+參數範例（設定區域）：
 
-- Logs the counting data at end of the day.
-- Useful for footfall analysis. Below is an example:
-<img src="https://imgur.com/CV2nCjx.png" width=400>
+```bash
+--rect-x 100 --rect-y 150 --rect-w 400 --rect-h 200 --tilt-angle 10
+```
+
+偵測資料儲存在：`utils/data/logs/counting_data.csv`
 
 ---
 
-## References
+## 區域調整與預覽工具說明 (`region_tweak_gui.py` / `region_tweak_web.py`)
 
-***Main:***
+本工具提供即時視覺介面，用於調整及預覽人流計數區域的座標、尺寸與傾斜角度。
 
-- SSD paper: https://arxiv.org/abs/1512.02325
-- MobileNets paper: https://arxiv.org/abs/1704.04861
-- Centroid tracker: https://www.pyimagesearch.com/2018/07/23/simple-object-tracking-with-opencv/
+### 使用GUI版本（Kivy）
 
-***Optional:***
+```bash
+python region_tweak_gui.py
+```
 
-- Object detection with SSD/MobileNets: https://pyimagesearch.com/2017/09/11/object-detection-with-deep-learning-and-opencv/
-- Schedule: https://pypi.org/project/schedule/
+### 使用Web版本（NiceGUI）
+
+```bash
+python region_tweak_web.py
+```
+
+透過互動介面，即時調整並獲取最佳參數設定。
 
 ---
 
-*saimj7/ 19-08-2020 - © <a href="http://saimj7.github.io" target="_blank">Sai_Mj</a>.*
+## 視覺化儀表板說明 (`dashboard.py`)
+
+啟動Streamlit儀表板查看分析結果：
+
+```bash
+streamlit run dashboard.py
+```
+
+儀表板功能包含：
+
+* 總人數、平均停留時間、中位停留時間及有效停留比例
+* 可依據不同時間區間（1分鐘, 15分鐘、30分鐘、小時、天）進行分析
+* 每10秒刷新數據來源
+
+---
+
+## 常見問題 FAQ
+
+**Q1：計數區域該如何調整？**
+
+使用`region_tweak_gui.py`或`region_tweak_web.py`進行直覺化調整。
+
+**Q2：如何更換模型？**
+
+將MobileNet-SSD模型替換為其他兼容的物件偵測模型即可。
+
+**Q3：如何處理不同的攝影機URL？**
+
+修改`config.json`的`url`值，例如`0`（本地攝影機）或其他RTSP網址。
+
+---
+
+## License 授權
+
+MIT License
+
+---
+
+> Powered by Python, OpenCV, Norfair, NiceGUI, Kivy, and Streamlit
