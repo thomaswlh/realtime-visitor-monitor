@@ -17,14 +17,13 @@ st.title("廣告機人流統計數據")
 # ---- 側邊欄控制 ----
 st.sidebar.header("設定")
 csv_file = st.sidebar.text_input("CSV 檔案路徑", value="utils/data/logs/counting_data.csv")
-interval = st.sidebar.selectbox("時間顯示單位", ["1分鐘","15分鐘", "30分鐘", "分鐘", "小時", "天"])
+interval = st.sidebar.selectbox("時間顯示單位", ["1分鐘","15分鐘", "30分鐘", "1小時", "1天"])
 engaged_sec = st.sidebar.slider("有效停留最少秒數", min_value=0.5, max_value=10.0, value=2.0, step=0.5)
 
 interval_map = {
     "1分鐘": "1T",
     "15分鐘": "15T",
     "30分鐘": "30T",
-    "分鐘": "T",
     "小時": "H",
     "天": "D"
 }
@@ -33,7 +32,7 @@ freq = interval_map[interval]
 df = load_data(csv_file)
 
 # ---- 計算主要指標 ----
-st.subheader("主要指標（所選區間）")
+st.subheader("指標")
 
 total_visitors = len(df)
 avg_stay = df["Stay Duration"].mean()
@@ -54,10 +53,10 @@ avg_stays = df_time["Stay Duration"].resample(freq).mean()
 
 # ---- 圖表 ----
 
-st.subheader(f"各{interval}人流量")
+st.subheader(f"人流量（以{interval}為單位）")
 st.bar_chart(footfall, use_container_width=True)
 
-st.subheader(f"各{interval}平均停留時間")
+st.subheader(f"平均停留時間（以{interval}為單位）")
 st.line_chart(avg_stays, use_container_width=True)
 
 # ---- 原始資料預覽 ----
