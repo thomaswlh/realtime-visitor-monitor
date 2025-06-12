@@ -35,20 +35,38 @@ img_h, img_w = frame.shape[:2]
 
 # ---- State ----
 state = {'x': 50, 'y': 50, 'w': 200, 'h': 120, 'tilt': 0, 'pointer': None}
+state['cmd'] = f"python people_counter.py -p models/MobileNetSSD_deploy.prototxt -m models/MobileNetSSD_deploy.caffemodel --rect-x {state['x']} --rect-y {state['y']} --rect-w {state['w']} --rect-h {state['h']} --tilt-angle {state['tilt']}"
 frame_lock = threading.Lock()
 last_frame = None
 
 # ---- UI Elements ----
 with ui.row().style('align-items:center; gap:8px; padding:8px'):
-    x_input = ui.input(value=state['x'], label='X').style('width:80px; height:40px').bind_value(state, 'x')
-    y_input = ui.input(value=state['y'], label='Y').style('width:80px; height:40px').bind_value(state, 'y')
+    ui.label('X')
+    x_slider = ui.slider(min=0, max=img_w, value=state['x']).style('width:200px').bind_value(state, 'x')
+    x_input = ui.input(value=state['x'], label='').style('width:80px; height:40px').bind_value(state, 'x')
+
+    ui.label('Y')
+    y_slider = ui.slider(min=0, max=img_h, value=state['y']).style('width:200px').bind_value(state, 'y')
+    y_input = ui.input(value=state['y'], label='').style('width:80px; height:40px').bind_value(state, 'y')
+
     ui.label('W')
     w_slider = ui.slider(min=50, max=img_w, value=state['w']).style('width:200px').bind_value(state, 'w')
+    w_input = ui.input(value=state['w'], label='').style('width:80px; height:40px').bind_value(state, 'w')
+
     ui.label('H')
     h_slider = ui.slider(min=50, max=img_h, value=state['h']).style('width:200px').bind_value(state, 'h')
+    h_input = ui.input(value=state['h'], label='').style('width:80px; height:40px').bind_value(state, 'h')
+
     ui.label('Tilt')
-    tilt_slider = ui.slider(min=-30, max=30, value=state['tilt']).style('width:180px').bind_value(state, 'tilt')
+    tilt_slider = ui.slider(min=-90, max=90, value=state['tilt']).style('width:180px').bind_value(state, 'tilt')
+    tilt_input = ui.input(value=state['tilt'], label='').style('width:80px; height:40px').bind_value(state, 'tilt')
+
     ui.button('Reset', on_click=lambda: reset()).style('height:40px; background:#f33; color:white;')
+
+with ui.row().style('align-items:center; gap:8px; padding:8px'):
+    ui.label('Generated command for people_counter.py: ')
+    cmd_textbox = ui.input(value=state['cmd'], label='').style('width:1200px; height:40px').bind_value(state, 'cmd')
+
 
 image = ui.interactive_image().style(f'width:{img_w}px; height:{img_h}px; cursor:crosshair;')
 status = ui.label('')
@@ -66,9 +84,15 @@ def reset():
 
 def on_click(e):
     ox, oy = e.args['offsetX'], e.args['offsetY']
-    px = int(ox * img_w / image.element.size[0])
-    py = int(oy * img_h / image.element.size[1])
+
+    display_w = img_w  # 或者你在 style 設定的顯示寬度
+    display_h = img_h  # 或者你在 style 設定的顯示高度
+
+    px = int(ox * img_w / display_w)
+    py = int(oy * img_h / display_h)
     state['pointer'] = (px, py)
+    
+
 image.on('click', on_click)
 
 # ---- Background Thread: Grab & encode frames ----
@@ -89,12 +113,14 @@ def camera_loop():
             )
         except:
             continue
+        finally:
+            state['cmd'] = f"python people_counter.py -p models/MobileNetSSD_deploy.prototxt -m models/MobileNetSSD_deploy.caffemodel --rect-x {state['x']} --rect-y {state['y']} --rect-w {state['w']} --rect-h {state['h']} --tilt-angle {state['tilt']}"
         cv2.polylines(frame, [pts], isClosed=True, color=(0, 0, 255), thickness=2)
         _, buf = cv2.imencode('.jpg', frame)
         img_b64 = base64.b64encode(buf).decode('utf-8')
         with frame_lock:
             last_frame = f'data:image/jpeg;base64,{img_b64}'
-        time.sleep(1 / 30)  # Limit to 30 FPS
+        time.sleep(1 / 60)  # Limit to 60 FPS
 
 threading.Thread(target=camera_loop, daemon=True).start()
 
