@@ -22,7 +22,7 @@
 
 * [安裝 Installation](#安裝-installation)
 * [人流偵測程式說明（people\_counter.py）](#人流偵測程式說明-people_counterpy)
-* [區域調整與預覽工具說明（region\_tweak\_gui.py / region\_tweak\_web.py）](#區域調整與預覽工具說明-region_tweak)
+* [區域調整與預覽工具說明（ region\_tweak\_gui.py  / region\_tweak\_web.py）](#區域調整與預覽工具說明-region_tweak)
 * [視覺化儀表板說明（dashboard.py）](#視覺化儀表板說明-dashboardpy)
 * [常見問題 FAQ](#常見問題-faq)
 * [License 授權](#license-授權)
@@ -92,11 +92,11 @@ python people_counter.py --prototxt detector/MobileNetSSD_deploy.prototxt --mode
 
 ---
 
-## 區域調整與預覽工具說明 (`region_tweak_gui.py` / `region_tweak_web.py`)
+## 區域調整與預覽工具說明 (`region_tweak_gui.py`~ / `region_tweak_web.py`)
 
 本工具提供即時視覺介面，用於調整及預覽人流計數區域的座標、尺寸與傾斜角度。
 
-### 使用GUI版本（Kivy）
+### 使用GUI版本 (Kivy, 只有基本功能)
 
 ```bash
 python region_tweak_gui.py
@@ -132,7 +132,7 @@ streamlit run dashboard.py
 
 **Q1：計數區域該如何調整？**
 
-使用`region_tweak_gui.py`或`region_tweak_web.py`進行直覺化調整。
+使用 region_tweak_gui.py`region_tweak_web.py`進行直覺化調整。
 
 **Q2：如何更換模型？**
 
