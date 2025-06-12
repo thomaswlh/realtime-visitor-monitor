@@ -1,367 +1,256 @@
-from tracker.centroidtracker import CentroidTracker
-from tracker.trackableobject import TrackableObject
-from imutils.video import VideoStream
-from itertools import zip_longest
-from utils.mailer import Mailer
-from imutils.video import FPS
-from utils import thread
+import cv2
 import numpy as np
-import threading
 import argparse
 import datetime
-import schedule
 import logging
 import imutils
 import time
-import dlib
 import json
 import csv
-import cv2
+from imutils.video import VideoStream, FPS
+from itertools import zip_longest
+import math
+import norfair
+from norfair import Detection, Tracker
 
-# execution start time
-start_time = time.time()
-# setup logger
-logging.basicConfig(level = logging.INFO, format = "[INFO] %(message)s")
+# Set up logging
+logging.basicConfig(level=logging.INFO, format="[INFO] %(message)s")
 logger = logging.getLogger(__name__)
-# initiate features config.
-with open("utils/config.json", "r") as file:
-    config = json.load(file)
+
+# Load configuration (for CSV path and stream URL, and optional default FPS)
+with open("utils/config.json", "r") as f:
+    config = json.load(f)
 
 def parse_arguments():
-	# function to parse the arguments
     ap = argparse.ArgumentParser()
     ap.add_argument("-p", "--prototxt", required=False,
-        help="path to Caffe 'deploy' prototxt file")
+                    help="(unused) kept for backward compatibility")
     ap.add_argument("-m", "--model", required=True,
-        help="path to Caffe pre-trained model")
+                    help="path to Caffe pre-trained model (.caffemodel)")
     ap.add_argument("-i", "--input", type=str,
-        help="path to optional input video file")
+                    help="path to optional input video file")
     ap.add_argument("-o", "--output", type=str,
-        help="path to optional output video file")
-    # confidence default 0.4
+                    help="path to optional output video file")
     ap.add_argument("-c", "--confidence", type=float, default=0.4,
-        help="minimum probability to filter weak detections")
-    ap.add_argument("-s", "--skip-frames", type=int, default=30,
-        help="# of skip frames between detections")
-    args = vars(ap.parse_args())
-    return args
+                    help="minimum probability to filter weak detections")
+    ap.add_argument("--rect-x", type=int, default=None,
+                    help="x-coordinate of top-left corner of counting rectangle")
+    ap.add_argument("--rect-y", type=int, default=None,
+                    help="y-coordinate of top-left corner of counting rectangle")
+    ap.add_argument("--rect-w", type=int, default=None,
+                    help="width of counting rectangle")
+    ap.add_argument("--rect-h", type=int, default=None,
+                    help="height of counting rectangle")
+    ap.add_argument("--tilt-angle", type=float, default=0,
+                    help="Camera tilt angle in degrees (positive = top tilts away from viewer)")
+    return vars(ap.parse_args())
 
-def send_mail():
-	# function to send the email alerts
-	Mailer().send(config["Email_Receive"])
+def log_data(move_in, in_time, move_out, out_time, stay_duration):
+    """Log counting data (including precomputed stay durations) to CSV."""
+    data = [move_in, in_time, move_out, out_time, stay_duration]
+    export_data = zip_longest(*data, fillvalue="")
+    with open("utils/data/logs/counting_data.csv", "w", newline="") as myfile:
+        wr = csv.writer(myfile, quoting=csv.QUOTE_ALL)
+        if myfile.tell() == 0:
+            wr.writerow(("Move In", "In Time", "Move Out", "Out Time", "Stay Duration"))
+        for row in export_data:
+            wr.writerow(row)
 
-def log_data(move_in, in_time, move_out, out_time):
-	# function to log the counting data
-	data = [move_in, in_time, move_out, out_time]
-	# transpose the data to align the columns properly
-	export_data = zip_longest(*data, fillvalue = '')
+def keystone_polygon(x, y, w, h, tilt_deg, frame_width):
+    tilt_rad = math.radians(tilt_deg)
+    max_shift = w // 3
+    shift = int(max_shift * math.sin(abs(tilt_rad)))
+    if tilt_deg > 0:
+        pts = np.array([
+            [x + shift, y],
+            [x + w - shift, y],
+            [x + w, y + h],
+            [x, y + h]
+        ])
+    else:
+        pts = np.array([
+            [x, y],
+            [x + w, y],
+            [x + w - shift, y + h],
+            [x + shift, y + h]
+        ])
+    pts[:, 0] = np.clip(pts[:, 0], 0, frame_width - 1)
+    return pts
 
-	with open('utils/data/logs/counting_data.csv', 'w', newline = '') as myfile:
-		wr = csv.writer(myfile, quoting = csv.QUOTE_ALL)
-		if myfile.tell() == 0: # check if header rows are already existing
-			wr.writerow(("Move In", "In Time", "Move Out", "Out Time"))
-			wr.writerows(export_data)
+def point_in_polygon(point, polygon):
+    x, y = point
+    poly = polygon.tolist() if isinstance(polygon, np.ndarray) else polygon
+    inside = False
+    px1, py1 = poly[0]
+    for i in range(len(poly) + 1):
+        px2, py2 = poly[i % len(poly)]
+        if y > min(py1, py2):
+            if y <= max(py1, py2):
+                if x <= max(px1, px2):
+                    if py1 != py2:
+                        xinters = (y - py1) * (px2 - px1) / (py2 - py1 + 1e-8) + px1
+                    if px1 == px2 or x <= xinters:
+                        inside = not inside
+        px1, py1 = px2, py2
+    return inside
 
 def people_counter():
-	# main function for people_counter.py
-	args = parse_arguments()
-	# initialize the list of class labels MobileNet SSD was trained to detect
-	CLASSES = ["background", "aeroplane", "bicycle", "bird", "boat",
-		"bottle", "bus", "car", "cat", "chair", "cow", "diningtable",
-		"dog", "horse", "motorbike", "person", "pottedplant", "sheep",
-		"sofa", "train", "tvmonitor"]
+    args = parse_arguments()
+    net = cv2.dnn.readNetFromCaffe(args["prototxt"], args["model"])
 
-	# load our serialized model from disk
-	net = cv2.dnn.readNetFromCaffe(args["prototxt"], args["model"])
+    # Start video source
+    if not args.get("input", False):
+        vs = VideoStream(config["url"]).start()
+        time.sleep(2.0)
+        feed_fps = config.get("feed_fps", 30)
+    else:
+        vs = cv2.VideoCapture(args["input"])
+        feed_fps = vs.get(cv2.CAP_PROP_FPS) or config.get("feed_fps", 30)
 
-	# if a video path was not supplied, grab a reference to the ip camera
-	if not args.get("input", False):
-		logger.info("Starting the live stream..")
-		vs = VideoStream(config["url"]).start()
-		time.sleep(2.0)
+    writer = None
+    W = H = None
 
-	# otherwise, grab a reference to the video file
-	else:
-		logger.info("Starting the video..")
-		vs = cv2.VideoCapture(args["input"])
+    tracker = Tracker(distance_function="euclidean", distance_threshold=30)
 
-	# initialize the video writer (we'll instantiate later if need be)
-	writer = None
+    class RegionTrackable:
+        def __init__(self, track_id, inside=False, entry_frame=None, entry_timestamp=None):
+            self.track_id = track_id
+            self.inside = inside
+            self.entry_frame = entry_frame
+            self.entry_timestamp = entry_timestamp
 
-	# initialize the frame dimensions (we'll set them as soon as we read
-	# the first frame from the video)
-	W = None
-	H = None
+    trackableObjects = {}
+    totalFrames = 0
+    totalIn = 0
+    totalOut = 0
+    move_in = []
+    move_out = []
+    in_time = []
+    out_time = []
+    stay_duration = []
+    fps = FPS().start()
 
-	# instantiate our centroid tracker, then initialize a list to store
-	# each of our dlib correlation trackers, followed by a dictionary to
-	# map each unique object ID to a TrackableObject
-	ct = CentroidTracker(maxDisappeared=40, maxDistance=50)
-	trackers = []
-	trackableObjects = {}
+    rect_x = args["rect_x"]
+    rect_y = args["rect_y"]
+    rect_w = args["rect_w"]
+    rect_h = args["rect_h"]
+    tilt_angle = args["tilt_angle"]
+    polygon = None
 
-	# initialize the total number of frames processed thus far, along
-	# with the total number of objects that have moved either up or down
-	totalFrames = 0
-	totalDown = 0
-	totalUp = 0
-	# initialize empty lists to store the counting data
-	total = []
-	move_out = []
-	move_in =[]
-	out_time = []
-	in_time = []
+    while True:
+        frame = vs.read()
+        frame = frame[1] if args.get("input", False) else frame
+        if args.get("input", False) and frame is None:
+            break
 
-	# start the frames per second throughput estimator
-	fps = FPS().start()
+        frame = imutils.resize(frame, width=500)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-	if config["Thread"]:
-		vs = thread.ThreadingClass(config["url"])
+        if W is None or H is None:
+            H, W = frame.shape[:2]
+            if None in (rect_x, rect_y, rect_w, rect_h):
+                rect_w = W
+                rect_h = H // 4
+                rect_x = 0
+                rect_y = (H // 2) - (rect_h // 2)
+            polygon = keystone_polygon(rect_x, rect_y, rect_w, rect_h, tilt_angle, W)
 
-	# loop over frames from the video stream
-	while True:
-		# grab the next frame and handle if we are reading from either
-		# VideoCapture or VideoStream
-		frame = vs.read()
-		frame = frame[1] if args.get("input", False) else frame
+        if polygon is not None:
+            cv2.polylines(frame, [polygon], isClosed=True, color=(0, 0, 255), thickness=2)
 
-		# if we are viewing a video and we did not grab a frame then we
-		# have reached the end of the video
-		if args["input"] is not None and frame is None:
-			break
+        if args.get("output") and writer is None:
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            writer = cv2.VideoWriter(args["output"], fourcc, feed_fps, (W, H), True)
 
-		# resize the frame to have a maximum width of 500 pixels (the
-		# less data we have, the faster we can process it), then convert
-		# the frame from BGR to RGB for dlib
-		frame = imutils.resize(frame, width = 500)
-		rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # Detection
+        blob = cv2.dnn.blobFromImage(frame, 0.007843, (W, H), 127.5)
+        net.setInput(blob)
+        detections = net.forward()
 
-		# if the frame dimensions are empty, set them
-		if W is None or H is None:
-			(H, W) = frame.shape[:2]
+        norfair_detections = []
+        for i in np.arange(0, detections.shape[2]):
+            conf = float(detections[0, 0, i, 2])
+            if conf < args["confidence"]:
+                continue
+            cls = int(detections[0, 0, i, 1])
+            if cls != 15: continue
+            box = (detections[0, 0, i, 3:7] * [W, H, W, H]).astype(int)
+            sx, sy, ex, ey = box
+            cx, cy = (sx + ex)//2, (sy + ey)//2
+            norfair_detections.append(
+                Detection(points=np.array([[cx, cy]]), scores=np.array([conf]))
+            )
 
-		# if we are supposed to be writing a video to disk, initialize
-		# the writer
-		if args["output"] is not None and writer is None:
-			fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-			writer = cv2.VideoWriter(args["output"], fourcc, 30,
-				(W, H), True)
+        tracked_objects = tracker.update(detections=norfair_detections)
 
-		# initialize the current status along with our list of bounding
-		# box rectangles returned by either (1) our object detector or
-		# (2) the correlation trackers
-		status = "Waiting"
-		rects = []
+        for obj in tracked_objects:
+            tid = obj.id
+            cx, cy = obj.estimate.astype(int)[0]
+            inside = point_in_polygon((cx, cy), polygon)
+            to = trackableObjects.get(tid)
 
-		# check to see if we should run a more computationally expensive
-		# object detection method to aid our tracker
-		if totalFrames % args["skip_frames"] == 0:
-			# set the status and initialize our new set of object trackers
-			status = "Detecting"
-			trackers = []
+            if to is None:
+                # First sighting
+                if inside:
+                    entry_ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+                    to = RegionTrackable(tid, inside, entry_frame=totalFrames, entry_timestamp=entry_ts)
+                    totalIn += 1
+                    move_in.append(totalIn)
+                    in_time.append(entry_ts)
+                else:
+                    to = RegionTrackable(tid, inside)
+            else:
+                if not to.inside and inside:
+                    # Entering
+                    entry_ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+                    to.entry_frame = totalFrames
+                    to.entry_timestamp = entry_ts
+                    totalIn += 1
+                    move_in.append(totalIn)
+                    in_time.append(entry_ts)
+                elif to.inside and not inside and to.entry_frame is not None:
+                    # Exiting
+                    exit_ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+                    totalOut += 1
+                    move_out.append(totalOut)
+                    out_time.append(exit_ts)
+                    dur = (totalFrames - to.entry_frame) / feed_fps
+                    stay_duration.append(round(dur, 2))
+                    to.entry_frame = None
+                    to.entry_timestamp = None
 
-			# convert the frame to a blob and pass the blob through the
-			# network and obtain the detections
-			blob = cv2.dnn.blobFromImage(frame, 0.007843, (W, H), 127.5)
-			net.setInput(blob)
-			detections = net.forward()
+                to.inside = inside
 
-			# loop over the detections
-			for i in np.arange(0, detections.shape[2]):
-				# extract the confidence (i.e., probability) associated
-				# with the prediction
-				confidence = detections[0, 0, i, 2]
+            trackableObjects[tid] = to
 
-				# filter out weak detections by requiring a minimum
-				# confidence
-				if confidence > args["confidence"]:
-					# extract the index of the class label from the
-					# detections list
-					idx = int(detections[0, 0, i, 1])
+            cv2.putText(frame, f"ID {tid}", (cx-10, cy-10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 2)
+            cv2.circle(frame, (cx, cy), 4, (255,255,255), -1)
 
-					# if the class label is not a person, ignore it
-					if CLASSES[idx] != "person":
-						continue
+        cv2.putText(frame, f"In: {totalIn}", (10, H-40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+        cv2.putText(frame, f"Out: {totalOut}", (10, H-20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
 
-					# compute the (x, y)-coordinates of the bounding box
-					# for the object
-					box = detections[0, 0, i, 3:7] * np.array([W, H, W, H])
-					(startX, startY, endX, endY) = box.astype("int")
+        # Log data
+        log_data(move_in, in_time, move_out, out_time, stay_duration)
 
-					# construct a dlib rectangle object from the bounding
-					# box coordinates and then start the dlib correlation
-					# tracker
-					tracker = dlib.correlation_tracker()
-					rect = dlib.rectangle(startX, startY, endX, endY)
-					tracker.start_track(rgb, rect)
+        if writer:
+            writer.write(frame)
+        cv2.imshow("People Counter", frame)
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
 
-					# add the tracker to our list of trackers so we can
-					# utilize it during skip frames
-					trackers.append(tracker)
+        totalFrames += 1
+        fps.update()
 
-		# otherwise, we should utilize our object *trackers* rather than
-		# object *detectors* to obtain a higher frame processing throughput
-		else:
-			# loop over the trackers
-			for tracker in trackers:
-				# set the status of our system to be 'tracking' rather
-				# than 'waiting' or 'detecting'
-				status = "Tracking"
+    fps.stop()
+    logger.info(f"Elapsed time: {fps.elapsed():.2f} seconds")
+    logger.info(f"Approx. FPS: {fps.fps():.2f}")
 
-				# update the tracker and grab the updated position
-				tracker.update(rgb)
-				pos = tracker.get_position()
+    if args.get("input"):
+        vs.release()
+    cv2.destroyAllWindows()
 
-				# unpack the position object
-				startX = int(pos.left())
-				startY = int(pos.top())
-				endX = int(pos.right())
-				endY = int(pos.bottom())
-
-				# add the bounding box coordinates to the rectangles list
-				rects.append((startX, startY, endX, endY))
-
-		# draw a horizontal line in the center of the frame -- once an
-		# object crosses this line we will determine whether they were
-		# moving 'up' or 'down'
-		cv2.line(frame, (0, H // 2), (W, H // 2), (0, 0, 0), 3)
-		cv2.putText(frame, "-Prediction border - Entrance-", (10, H - ((i * 20) + 200)),
-			cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
-
-		# use the centroid tracker to associate the (1) old object
-		# centroids with (2) the newly computed object centroids
-		objects = ct.update(rects)
-
-		# loop over the tracked objects
-		for (objectID, centroid) in objects.items():
-			# check to see if a trackable object exists for the current
-			# object ID
-			to = trackableObjects.get(objectID, None)
-
-			# if there is no existing trackable object, create one
-			if to is None:
-				to = TrackableObject(objectID, centroid)
-
-			# otherwise, there is a trackable object so we can utilize it
-			# to determine direction
-			else:
-				# the difference between the y-coordinate of the *current*
-				# centroid and the mean of *previous* centroids will tell
-				# us in which direction the object is moving (negative for
-				# 'up' and positive for 'down')
-				y = [c[1] for c in to.centroids]
-				direction = centroid[1] - np.mean(y)
-				to.centroids.append(centroid)
-
-				# check to see if the object has been counted or not
-				if not to.counted:
-					# if the direction is negative (indicating the object
-					# is moving up) AND the centroid is above the center
-					# line, count the object
-					if direction < 0 and centroid[1] < H // 2:
-						totalUp += 1
-						date_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-						move_out.append(totalUp)
-						out_time.append(date_time)
-						to.counted = True
-
-					# if the direction is positive (indicating the object
-					# is moving down) AND the centroid is below the
-					# center line, count the object
-					elif direction > 0 and centroid[1] > H // 2:
-						totalDown += 1
-						date_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-						move_in.append(totalDown)
-						in_time.append(date_time)
-						# if the people limit exceeds over threshold, send an email alert
-						if sum(total) >= config["Threshold"]:
-							cv2.putText(frame, "-ALERT: People limit exceeded-", (10, frame.shape[0] - 80),
-								cv2.FONT_HERSHEY_COMPLEX, 0.5, (0, 0, 255), 2)
-							if config["ALERT"]:
-								logger.info("Sending email alert..")
-								email_thread = threading.Thread(target = send_mail)
-								email_thread.daemon = True
-								email_thread.start()
-								logger.info("Alert sent!")
-						to.counted = True
-						# compute the sum of total people inside
-						total = []
-						total.append(len(move_in) - len(move_out))
-
-			# store the trackable object in our dictionary
-			trackableObjects[objectID] = to
-
-			# draw both the ID of the object and the centroid of the
-			# object on the output frame
-			text = "ID {}".format(objectID)
-			cv2.putText(frame, text, (centroid[0] - 10, centroid[1] - 10),
-				cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-			cv2.circle(frame, (centroid[0], centroid[1]), 4, (255, 255, 255), -1)
-
-		# construct a tuple of information we will be displaying on the frame
-		info_status = [
-		("Exit", totalUp),
-		("Enter", totalDown),
-		("Status", status),
-		]
-
-		info_total = [
-		("Total people inside", ', '.join(map(str, total))),
-		]
-
-		# display the output
-		for (i, (k, v)) in enumerate(info_status):
-			text = "{}: {}".format(k, v)
-			cv2.putText(frame, text, (10, H - ((i * 20) + 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-
-		for (i, (k, v)) in enumerate(info_total):
-			text = "{}: {}".format(k, v)
-			cv2.putText(frame, text, (265, H - ((i * 20) + 60)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-		# initiate a simple log to save the counting data
-		if config["Log"]:
-			log_data(move_in, in_time, move_out, out_time)
-
-		# check to see if we should write the frame to disk
-		if writer is not None:
-			writer.write(frame)
-
-		# show the output frame
-		cv2.imshow("Real-Time Monitoring/Analysis Window", frame)
-		key = cv2.waitKey(1) & 0xFF
-		# if the `q` key was pressed, break from the loop
-		if key == ord("q"):
-			break
-		# increment the total number of frames processed thus far and
-		# then update the FPS counter
-		totalFrames += 1
-		fps.update()
-
-		# initiate the timer
-		if config["Timer"]:
-			# automatic timer to stop the live stream (set to 8 hours/28800s)
-			end_time = time.time()
-			num_seconds = (end_time - start_time)
-			if num_seconds > 28800:
-				break
-
-	# stop the timer and display FPS information
-	fps.stop()
-	logger.info("Elapsed time: {:.2f}".format(fps.elapsed()))
-	logger.info("Approx. FPS: {:.2f}".format(fps.fps()))
-
-	# release the camera device/resource (issue 15)
-	if config["Thread"]:
-		vs.release()
-
-	# close any open windows
-	cv2.destroyAllWindows()
-
-# initiate the scheduler
-if config["Scheduler"]:
-	# runs at every day (09:00 am)
-	schedule.every().day.at("09:00").do(people_counter)
-	while True:
-		schedule.run_pending()
-else:
-	people_counter()
+if __name__ == "__main__":
+    people_counter()
